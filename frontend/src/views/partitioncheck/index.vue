@@ -36,7 +36,7 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">{{ displayCell(row, column) }}</td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -47,6 +47,7 @@
             >
               {{ action }}
             </button>
+            <button class="link" type="button" @click="openReports(row)">关联差异报告</button>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -55,31 +56,83 @@
       </tbody>
     </table>
 
+    <section v-if="reportPanel" class="report-panel">
+      <header class="report-head">
+        <h3>关联差异报告 · 规则 {{ reportPanel.ruleNo }}（{{ reportPanel.table }}）</h3>
+        <button class="btn ghost" type="button" @click="reportPanel = null">关闭</button>
+      </header>
+      <p v-if="!reportPanel.reports.length" class="empty-state">该表暂无关联的终态差异报告</p>
+      <table v-else class="data-table">
+        <thead>
+          <tr>
+            <th v-for="column in reportColumns" :key="column">{{ column }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="report in reportPanel.reports" :key="String(report.id)">
+            <td v-for="column in reportColumns" :key="column">{{ reportCell(report, column) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
     <footer class="page-foot">
       <span>共 {{ total }} 条分区检测记录</span>
+      <span v-if="noticeMessage" class="notice-text">{{ noticeMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, any>
 
 const ENDPOINT = '/api/partitioncheck'
-const columns = ["规则编号", "数据表名", "期望分区数", "分区延迟容忍", "缺失分区告警", "检测间隔分钟", "自动补齐开关", "补齐优先级"]
-const actions = ["提交规则评审", "启用规则", "暂停规则"]
-const statuses = ["草稿", "规则评审中", "已启用", "已暂停"]
-const stats = [{"label": "检测规则总数", "value": 0}, {"label": "已启用规则", "value": 0}, {"label": "评审中规则", "value": 0}]
+const ruleFields = ["规则编号", "数据表名", "期望分区数", "分区延迟容忍", "缺失分区告警", "检测间隔分钟", "自动补齐开关", "补齐优先级"]
+const detectFields = ["差异数量", "未核对分区", "缺失分区"]
+const columns = [...ruleFields, ...detectFields]
+const actions = ["提交规则评审", "启用规则", "暂停规则", "检测缺失分区"]
+const reportColumns = ["报告编号", "任务编号", "源表名", "目标表名", "比对字段", "差异数量", "未核对分区", "终态", "生成时间"]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const noticeMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = ruleFields.slice(0, 3)
+const reportPanel = ref<{ ruleNo: string; table: string; reports: Row[] } | null>(null)
+
+const stats = computed(() => [
+  { label: "检测规则总数", value: total.value },
+  { label: "已启用规则", value: rows.value.filter((row) => row.status === '已启用').length },
+  { label: "评审中规则", value: rows.value.filter((row) => row.status === '规则评审中').length },
+])
+
+function joinList(value: unknown): string {
+  if (Array.isArray(value) && value.length) {
+    return value.join('、')
+  }
+  return '—'
+}
+
+function displayCell(row: Row, column: string): string {
+  const value = row[column]
+  if (Array.isArray(value)) {
+    return joinList(value)
+  }
+  if (value === null || value === undefined || value === '') {
+    return '—'
+  }
+  return String(value)
+}
+
+function reportCell(report: Row, column: string): string {
+  return displayCell(report, column)
+}
 
 function resetFilters() {
   filters.value = {}
@@ -96,17 +149,38 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  noticeMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('分区检测动作未生效，请稍后重试')
+    const payload = await response.json()
+    if (!payload.ok) {
+      throw new Error(payload.message || '分区检测动作未生效')
     }
+    noticeMessage.value = payload.message || `检测规则已${action}`
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '分区检测操作失败'
+  }
+}
+
+async function openReports(row: Row) {
+  errorMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/${row.id}/diffreports`)
+    if (!response.ok) {
+      throw new Error('关联差异报告读取失败')
+    }
+    const payload = await response.json()
+    reportPanel.value = {
+      ruleNo: String(row['规则编号'] ?? row.id),
+      table: String(row['数据表名'] ?? ''),
+      reports: payload.reports ?? [],
+    }
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '关联差异报告读取失败'
   }
 }
 
@@ -128,3 +202,26 @@ async function reload() {
 
 onMounted(reload)
 </script>
+
+<style scoped>
+.report-panel {
+  margin-top: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+.report-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.report-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.notice-text {
+  color: #067647;
+}
+</style>

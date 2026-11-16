@@ -4,9 +4,13 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from app.seed import SEED_ROWS
+
+# 内部数据记录表：跨模块共享（如差异报告），不作为业务模块出现在概览里。
+INTERNAL_MODULES = {"diffreport"}
 
 
 class Store:
@@ -14,9 +18,11 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 终态与差异报告等多步写入必须原子落库，统一用这把可重入锁串行化。
+        self.lock = threading.RLock()
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        return sorted(name for name in self._tables if name not in INTERNAL_MODULES)
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
